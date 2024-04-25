@@ -4,40 +4,41 @@ __email__       = "lara.orlandic@epfl.ch"
 
 import numpy as np
 
+from .spm import SPM_NLINES
+
 # Configuration register (CREG) / instruction memory sizes of specialized slots
 KER_CONF_N_REG = 16
 
 # Widths of instructions of each specialized slot in bits
-KER_CONF_IMEM_WIDTH = 21
+KMEM_IMEM_WIDTH = 21
 
 # KERNEL CONFIGURATION #
-class KER_CONF:
+class KMEM_IMEM:
     '''Kernel memory: Keeps track of which kernels are loaded into the IMEM of VWR2A'''
     def __init__(self):
-        self.IMEM = np.zeros(KER_CONF_N_REG,dtype="S{0}".format(KER_CONF_IMEM_WIDTH))
+        self.IMEM = np.zeros(KER_CONF_N_REG,dtype="S{0}".format(KMEM_IMEM_WIDTH))
         # Initialize kernel memory with zeros
         for i, instruction in enumerate(self.IMEM):
-            self.IMEM[i] = np.binary_repr(0,width=KER_CONF_IMEM_WIDTH)
+            self.IMEM[i] = np.binary_repr(0,width=KMEM_IMEM_WIDTH)
+        
     
     def set_word(self, kmem_word, pos):
         '''Set the IMEM index at integer pos to the binary kmem word'''
         assert (pos>0), "Kernel word 0 is reserved; need to pick a position >0 and <16"
         
-        self.IMEM[pos] = np.binary_repr(kmem_word,width=KER_CONF_IMEM_WIDTH)
+        self.IMEM[pos] = np.binary_repr(kmem_word,width=KMEM_IMEM_WIDTH)
     
-    def set_params(self, num_instructions=0, imem_add_start=0, column_usage=0, srf_spm_addres=0, pos=1):
+    def set_params(self, num_instructions_per_col=0, imem_add_start=0, col_one_hot=1, srf_spm_addres=0, pos=1):
         '''Set the IMEM index at integer pos to the configuration parameters.
         See KMEM_WORD initializer for implementation details.
         '''
         
         assert (pos>0), "Kernel word 0 is reserved; need to pick a position >0 and <16"
-        assert (num_instructions>0) & (num_instructions<64), "Invalid kernel; number of instructions is either negative or too big"
-        assert (column_usage>0), "The column attribute must be one-hot encoded"
-        
+        assert (num_instructions_per_col>0) & (num_instructions_per_col<64), "Invalid kernel; number of instructions is either negative or too big"
+
         # Note: The number of instructions encoded in the kmem word is always one less than the actual number of instructions
-        n_instr_kmem = num_instructions-1
-        
-        kmem_word = KMEM_WORD(n_instr_kmem, imem_add_start, column_usage, srf_spm_addres)
+        n_instr_kmem = num_instructions_per_col-1
+        kmem_word = KMEM_WORD(num_instructions=n_instr_kmem, imem_add_start=imem_add_start, column_usage=col_one_hot, srf_spm_addres=srf_spm_addres)
         self.IMEM[pos] = kmem_word.get_word()
     
     def get_params(self, pos):
@@ -70,7 +71,7 @@ class KER_CONF:
 
     
 class KMEM_WORD:
-    def __init__(self, num_instructions=0, imem_add_start=0, column_usage=0, srf_spm_addres=0):
+    def __init__(self, hex_word=None, num_instructions=0, imem_add_start=0, column_usage=0, srf_spm_addres=0):
         '''Generate a binary kmem instruction word from its configuration paramerers:
         
            -   num_instructions: number of IMEM lines the kernel occupies (0 to 63)
@@ -82,11 +83,23 @@ class KMEM_WORD:
            -   srf_spm_address: address of SPM that SRF occupies (0 to 15)
         
         '''
-        self.num_instructions = np.binary_repr(num_instructions, width=6)
-        self.imem_add_start = np.binary_repr(imem_add_start, width=9)
-        self.column_usage = np.binary_repr(column_usage,width=2)
-        self.srf_spm_addres = np.binary_repr(srf_spm_addres,4)
-        self.word = "".join((self.srf_spm_addres,self.column_usage,self.imem_add_start,self.num_instructions))
+        if hex_word == None:
+            self.num_instructions = np.binary_repr(num_instructions, width=6)
+            self.imem_add_start = np.binary_repr(imem_add_start, width=9)
+            self.column_usage = np.binary_repr(column_usage,width=2)
+            self.srf_spm_addres = np.binary_repr(srf_spm_addres,4)
+            self.word = "".join((self.srf_spm_addres,self.column_usage,self.imem_add_start,self.num_instructions))
+        else:
+            decimal_int = int(hex_word, 16)
+            binary_number = bin(decimal_int)[2:] # Removing the '0b' prefix
+            # Extend binary number to KMEM_IMEM_WIDTH bits
+            extended_binary = binary_number.zfill(KMEM_IMEM_WIDTH)
+
+            self.num_instructions = extended_binary[15:21] # 6 bits
+            self.imem_add_start = extended_binary[6:15] # 9 bit
+            self.column_usage = extended_binary[4:6] # 2 bits
+            self.srf_spm_addres = extended_binary[:4] # 4 bits
+            self.word = extended_binary
     
     def get_word(self):
         return self.word
@@ -108,3 +121,15 @@ class KMEM_WORD:
         spm_add = int(self.srf_spm_addres, 2)
         
         return n_instr, imem_add, col, spm_add
+
+class KMEM:
+    def __init__(self):
+        self.default_word = KMEM_WORD().get_word()
+        self.imem         = KMEM_IMEM()
+    
+    def addKernel(self, num_instructions_per_col=0, imem_add_start=0, col_one_hot=1, srf_spm_addres=0, nKernel=1):
+        assert(srf_spm_addres >= 0 and srf_spm_addres < SPM_NLINES), "The SPM line number for the SRF initial position is out of bounds. It must be between 0 and " + str(SPM_NLINES-1) + ", both included."
+        assert(nKernel > 0 and nKernel < KER_CONF_N_REG), "The number of kernel is out of bounds. It must be greater than 0 and less than " + str(KER_CONF_N_REG) + "."
+
+        self.imem.set_params(num_instructions_per_col=num_instructions_per_col, imem_add_start=imem_add_start, col_one_hot=col_one_hot, srf_spm_addres=srf_spm_addres, pos=nKernel)
+        
